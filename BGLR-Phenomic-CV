@@ -1,0 +1,147 @@
+#for phenomic prediction CV
+library(BGLR)
+library(rrBLUP)  # for imputation and mixed.solve
+rm(list = ls(all = TRUE))
+library(beepr)
+
+# Set working directory and load data
+setwd("E:/DON_Pheno_Geno_Prediction")
+
+data_geno <- read.table("Training_Set_Genomic_Prediction_V3.csv", sep = ",", header = TRUE)
+data_geno$DON <- NULL
+row.names(data_geno) <- data_geno[, 1]
+data_geno <- data_geno[, -1]
+
+data_pheno <- read.table("Savitz_Training_Set_2021-2022_Phenomic_Prediction_Range.csv", sep=",", header = TRUE)
+row.names(data_pheno) <- data_pheno[, 1]
+data_pheno <- data_pheno[, -1]
+
+# Ensure genotype names match in both datasets
+common_genotypes <- intersect(rownames(data_pheno), rownames(data_geno))
+data_pheno <- data_pheno[common_genotypes, ]
+data_geno <- data_geno[common_genotypes, ]
+
+# Convert genomic data to numeric matrix
+data_geno <- data.matrix(data_geno)
+
+# Specify the number of traits and cycles
+traits <- 1  # Change as needed
+cycles <- 100
+
+# Initialize results matrix
+results_matrix <- matrix(nrow = cycles, ncol = 6) 
+colnames(results_matrix) <- c("Pearson_Correlation", "Genetic_Correlation", "H2_cv", "H2_actual", "Acc", "Acc_1")
+
+for (p in 1:traits) {
+  print(paste('Trait', p, sep=' '))
+  
+  # Remove rows with missing phenotype data for the pth trait
+  pheno <- data_pheno[, p]
+  if (any(is.na(pheno))) {
+    data2 <- data_pheno[-which(is.na(pheno)), ]
+  } else {
+    data2 <- data_pheno  
+  }
+  
+  # Create phenotype matrix (dataY) for the pth trait
+  dataY <- as.matrix(data2[, p])
+  
+  # Set up phenomic data matrix
+  dataX <- data2[, -1:-traits]
+  for (x in 1:ncol(dataX)) {
+    dataX[, x] <- as.numeric(dataX[, x])
+  }
+  dataX <- as.matrix(dataX)
+  dataX <- scale(dataX, center = TRUE, scale = TRUE)
+  dataX <- t(na.omit(t(dataX)))  # Remove markers with missing data
+  
+  for (i in 1:cycles) {  
+    print(paste('Cycle', i, sep=' '))
+    
+    # Merge phenotype and phenomic matrices and randomize the order of individuals
+    xy <- cbind(dataY, dataX)
+    tst <- xy[sample(nrow(xy), replace = FALSE), ]
+    
+    # Define testing set size (~1/6th of the data)
+    size <- round(nrow(xy) / 6, digits = 0)
+    
+    # Separate the randomized data into predictor (dataX) and response (dataY) parts
+    dataX <- tst[, -1]
+    dataY <- as.matrix(tst[, 1])
+    
+    # Subset into training and testing sets
+    XTRN <- dataX[-(1:size), ]
+    yTRN <- dataY[-(1:size)]
+    XTST <- dataX[1:size, ]
+    yTST <- dataY[1:size]
+    
+    # Run the BGLR model on the training set
+    nIter  <- 50000   # or adjust (e.g., 500 for testing)
+    burnIn <- 5000    # or adjust (e.g., 50 for testing)
+    ETA <- list(list(X = XTRN, model = 'BRR', saveEffects = TRUE))
+    fm <- BGLR(y = yTRN, ETA = ETA, nIter = nIter, burnIn = burnIn, verbose = FALSE)
+    
+    # Get predictions for the testing set
+    yHatTST <- XTST %*% fm$ETA[[1]]$b
+    
+    # Compute Pearson correlation (observed prediction accuracy)
+    Pearson_Correlation <- cor(yTST, yHatTST)
+    
+    # Extract genotypic data matching the test set
+    test_genotypes <- rownames(tst)[1:size]  # Ensure correct matching
+    data_geno_filtered <- data_geno[test_genotypes, , drop = FALSE]  # Select only test genotypes
+    
+    # Ensure genotype data is numeric and has no missing values
+    data_geno_filtered <- data.matrix(data_geno_filtered)
+    
+    # Check if dimensions match before computing the genomic relationship matrix
+    if (nrow(data_geno_filtered) == length(yTST)) {
+      # Compute Genomic Relationship Matrix
+      G_test <- tcrossprod(data_geno_filtered) / ncol(data_geno_filtered)
+      
+      # Run rrBLUP mixed.solve on the test set
+      model_cv <- mixed.solve(y = yTST, K = G_test)
+      
+      # Calculate genetic correlation between BGLR predictions and rrBLUP estimated breeding values
+      Genetic_Correlation <- cor(yHatTST, model_cv$u)
+      
+      # Compute H² for cross-validation
+      genetic_variance_cv <- model_cv$Vu
+      residual_variance_cv <- var(yTST) - genetic_variance_cv
+      residual_variance_cv <- max(0, residual_variance_cv)  # Prevent negative residual variance
+      H2_cv <- genetic_variance_cv / (genetic_variance_cv + residual_variance_cv)
+      
+      # Compute H² for actual genetic variance
+      genetic_variance_actual <- var(model_cv$u)
+      residual_variance_actual <- var(yTST) - genetic_variance_actual
+      residual_variance_actual <- max(0, residual_variance_actual)  # Prevent negative residual variance
+      H2_actual <- genetic_variance_actual / (genetic_variance_actual + residual_variance_actual)
+      
+      # Compute accuracy metrics
+      Acc <- sqrt(H2_cv) * Genetic_Correlation
+      Acc_1 <- sqrt(H2_actual) * Genetic_Correlation
+    } else {
+      # If dimensions do not match, assign NA to avoid errors
+      Genetic_Correlation <- NA
+      H2_cv <- NA
+      H2_actual <- NA
+      Acc <- NA
+      Acc_1 <- NA
+    }    
+    # Store results in matrix
+    results_matrix[i, ] <- c(Pearson_Correlation, Genetic_Correlation, H2_cv, H2_actual, Acc, Acc_1)
+  }
+}
+
+# Convert results matrix to a dataframe for better readability
+BGLR_CV_results <- as.data.frame(results_matrix)
+
+# Compute means across cycles for final summary
+BGLR_CV_means <- colMeans(BGLR_CV_results, na.rm = TRUE)
+print(BGLR_CV_means)
+
+# Save all results
+write.table(BGLR_CV_results, "2021-2022_BRR_Phenomic_Range_Updated_Metrics.csv", sep = ",", row.names = FALSE)
+
+beep(sound = 4)
+
