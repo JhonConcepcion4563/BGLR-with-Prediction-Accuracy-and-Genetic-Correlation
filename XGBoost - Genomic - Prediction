@@ -1,0 +1,160 @@
+####################################################################################################
+# XGBoost for Genomic Predictions with Additional Metrics
+####################################################################################################
+library(xgboost)
+library(caret)
+library(dplyr)
+library(rrBLUP)  # For mixed.solve
+####################################################################################################
+rm(list = ls(all = TRUE))
+####################################################################################################
+setwd("E:/DON_Pheno_Geno_Prediction")
+####################################################################################################
+# Read genotypes
+data <- read.table("Training_Set_2021_Genomic_Prediction.csv", sep=",", header = TRUE)
+row.names(data) <- data[,1]
+data <- data[, -1]
+
+# Pool of train and test data
+dataX <- data[,2:ncol(data)]
+dataY <- as.matrix(data[,1])
+
+# Number of cross-validation cycles
+cycles <- 100
+
+# Initialize results matrix
+results_matrix <- matrix(nrow = cycles, ncol = 6) 
+colnames(results_matrix) <- c("Pearson_Correlation", "Genetic_Correlation", "H2_cv", "H2_actual", "Acc", "Acc_1")
+
+for (p in 1:ncol(dataY)) {
+  dataXY <- cbind(dataY[,p], dataX)
+  data.cv <- data.matrix(dataXY[complete.cases(dataXY[,1]), ]) # Remove missing phenotype data
+  nrow(data.cv)
+  
+  # Shuffle data
+  trntst <- data.cv[sample(nrow(data.cv), replace = F),]
+  
+  # Split training (80%) and testing (20%) data
+  trnsize <- round(nrow(data.cv) * 0.80, digits = 0)
+  train <- trntst[1:trnsize, ]
+  test  <- trntst[-1:-trnsize, ]
+  
+  X_train <- data.matrix(train[,-1])  # Genotype matrix for training
+  y_train <- train[,1]  # Phenotype for training
+  X_test <- data.matrix(test[,-1])  # Genotype matrix for testing
+  y_test <- test[,1]  # Phenotype for testing
+  
+  # Convert to XGBoost DMatrix
+  xgboost_train <- xgb.DMatrix(data=X_train, label=y_train)
+  xgboost_test <- xgb.DMatrix(data=X_test)
+  
+  # Hyperparameters
+  params <- list(
+    booster = "gbtree",
+    objective = "reg:squarederror",
+    eta = 0.01,
+    gamma = 0.2,
+    max_depth = 6,
+    min_child_weight = 20,
+    subsample = 1,
+    colsample_bytree = 1
+  )
+  
+  # Cross-validation to determine optimal rounds
+  cv <- xgb.cv(
+    params = params,
+    data = xgboost_train,
+    nrounds = 1000,
+    nfold = 5,
+    showsd = TRUE,
+    stratified = FALSE,
+    print_every_n = 50,
+    early_stopping_rounds = 100,
+    maximize = FALSE,
+    prediction = FALSE
+  )
+  
+  # Find optimal number of boosting rounds
+  elog <- cv$evaluation_log
+  minrow <- as.numeric(elog[which.min(elog$test_rmse_mean), 1])
+  
+  for (i in 1:cycles) {
+    # Shuffle and split again for each cycle
+    trntst <- data.cv[sample(nrow(data.cv), replace = F),]
+    train <- trntst[1:trnsize, ]
+    test  <- trntst[-1:-trnsize, ]
+    
+    X_train <- data.matrix(train[,-1])
+    y_train <- train[,1]
+    X_test <- data.matrix(test[,-1])
+    y_test <- test[,1]
+    
+    # Convert to XGBoost DMatrix
+    xgboost_train <- xgb.DMatrix(data=X_train, label=y_train)
+    xgboost_test <- xgb.DMatrix(data=X_test)
+    
+    # Train XGBoost model
+    model <- xgboost(
+      params = params,
+      data = xgboost_train,
+      nrounds = minrow,
+      verbose = 0
+    )
+    
+    # Predictions
+    pred_test <- predict(model, xgboost_test)
+    
+    # Ensure numeric format
+    pred_test <- as.numeric(pred_test)
+    y_test <- as.numeric(y_test)
+    
+    # 1. Compute Pearson correlation (Prediction Accuracy)
+    Pearson_Correlation <- cor(y_test, pred_test)
+    
+    # 2. Compute Genomic Relationship Matrix (GRM) for the testing set
+    G_test <- tcrossprod(X_test) / ncol(X_test)
+    
+    # 3. Run rrBLUP's mixed.solve to estimate breeding values
+    model_cv <- mixed.solve(y = y_test, K = G_test)
+    
+    # 4. Compute H2_cv (heritability in cross-validation)
+    genetic_variance_cv <- model_cv$Vu
+    residual_variance_cv <- var(y_test) - genetic_variance_cv
+    
+    if (residual_variance_cv < 0) {
+      residual_variance_cv <- 0  # Avoid negative residual variance
+    }
+    
+    H2_cv <- genetic_variance_cv / (genetic_variance_cv + residual_variance_cv)  # Ensure within [0,1]
+    
+    # 5. Compute genetic correlation between XGBoost predictions and rrBLUP breeding values
+    Genetic_Correlation <- cor(pred_test, model_cv$u)
+    
+    # 6. Compute H2_actual (actual heritability from rrBLUP)
+    genetic_variance_actual <- var(model_cv$u)
+    residual_variance_actual <- var(y_test) - genetic_variance_actual
+    
+    if (residual_variance_actual < 0) {
+      residual_variance_actual <- 0  # Avoid negative residual variance
+    }
+    
+    H2_actual <- genetic_variance_actual / (genetic_variance_actual + residual_variance_actual)  # Ensure within [0,1]
+    
+    # 7. Compute accuracy metrics
+    Acc <- sqrt(H2_cv) * Genetic_Correlation
+    Acc_1 <- sqrt(H2_actual) * Genetic_Correlation
+    
+    # Store results
+    results_matrix[i, ] <- c(Pearson_Correlation, Genetic_Correlation, H2_cv, H2_actual, Acc, Acc_1)
+  }
+}
+
+# Convert results matrix to a dataframe
+XGBoost_CV_results <- as.data.frame(results_matrix)
+
+# Compute means across cycles for final summary
+XGBoost_CV_means <- colMeans(XGBoost_CV_results)
+print(XGBoost_CV_means)
+
+# Save results
+write.table(XGBoost_CV_results, "2021_XGBoost_Genomic_Updated_Metrics.csv", sep = ",", row.names = FALSE)
