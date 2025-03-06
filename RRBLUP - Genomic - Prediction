@@ -1,0 +1,99 @@
+# RRBLUP Cross Validation with Additional Metrics
+rm(list = ls(all = TRUE))
+
+library(rrBLUP)
+
+setwd("E:/DON_Pheno_Geno_Prediction")
+
+####################################################################################################
+# Read data
+data <- read.table("Training_Set_Genomic_Prediction_V3.csv", sep=",", header = TRUE)
+data$Color <- NULL
+row.names(data) <- data[,1]
+data <- data[, -1]
+
+# Remove rows with missing values
+data <- data[complete.cases(data), ]
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Number of cross-validation cycles
+cycles <- 100 
+
+# Initialize results matrix
+results_matrix <- matrix(nrow = cycles, ncol = 6) 
+colnames(results_matrix) <- c("Pearson_Correlation", "Genetic_Correlation", "H2_cv", "H2_actual", "Acc", "Acc_1")
+
+for (i in 1:cycles) {
+  print(paste("Cycle", i))
+  
+  # Shuffle and split dataset into training (80%) and testing (20%)
+  data2 <- data[sample(nrow(data)), ]
+  
+  train_size <- round(nrow(data) * 0.80, digits = 0)
+  geno_train <- as.matrix(data2[1:train_size, -10])  # Exclude phenotype column
+  geno_valid <- as.matrix(data2[(train_size + 1):nrow(data2), -10])  # Exclude phenotype column
+  
+  yld_train <- as.matrix(data2[1:train_size, 10])  # Phenotype column
+  yld_valid <- as.matrix(data2[(train_size + 1):nrow(data2), 10])  # Phenotype column
+  
+  yld <- yld_train[,1]
+  yld_answer <- mixed.solve(yld, Z = geno_train, K = NULL, SE = FALSE, return.Hinv = FALSE)
+  
+  YLD <- yld_answer$u  # Estimated breeding values
+  e <- as.matrix(YLD)
+  
+  pred_yield_valid <- geno_valid %*% e
+  pred_yield <- (pred_yield_valid[,1]) + yld_answer$beta
+  yield_valid <- yld_valid
+  
+  # 1. Compute Pearson correlation (Prediction Accuracy)
+  Pearson_Correlation <- cor(pred_yield_valid, yield_valid, use = "complete")
+  
+  # 2. Compute Genomic Relationship Matrix (GRM) for the testing set
+  G_test <- tcrossprod(geno_valid) / ncol(geno_valid)
+  
+  # 3. Run rrBLUP's mixed.solve to estimate breeding values
+  model_cv <- mixed.solve(y = yield_valid, K = G_test)
+  
+  # 4. Compute H2_cv (heritability in cross-validation)
+  genetic_variance_cv <- model_cv$Vu
+  residual_variance_cv <- var(yield_valid) - genetic_variance_cv
+  
+  if (residual_variance_cv < 0) {
+    residual_variance_cv <- 0  # Avoid negative residual variance
+  }
+  
+  H2_cv <- genetic_variance_cv / (genetic_variance_cv + residual_variance_cv)  # Ensure within [0,1]
+  
+  # 5. Compute genetic correlation between RRBLUP predictions and rrBLUP breeding values
+  Genetic_Correlation <- cor(pred_yield_valid, model_cv$u)
+  
+  # 6. Compute H2_actual (actual heritability from rrBLUP)
+  genetic_variance_actual <- var(model_cv$u)
+  residual_variance_actual <- var(yield_valid) - genetic_variance_actual
+  
+  if (residual_variance_actual < 0) {
+    residual_variance_actual <- 0  # Avoid negative residual variance
+  }
+  
+  H2_actual <- genetic_variance_actual / (genetic_variance_actual + residual_variance_actual)  # Ensure within [0,1]
+  
+  # 7. Compute accuracy metrics
+  Acc <- sqrt(H2_cv) * Genetic_Correlation
+  Acc_1 <- sqrt(H2_actual) * Genetic_Correlation
+  
+  # Store results in the matrix
+  results_matrix[i, ] <- c(Pearson_Correlation, Genetic_Correlation, H2_cv, H2_actual, Acc, Acc_1)
+}
+
+# Convert results matrix to a dataframe
+RRBLUP_CV_results <- as.data.frame(results_matrix)
+
+# Compute means across cycles for final summary
+RRBLUP_CV_means <- colMeans(RRBLUP_CV_results)
+print(RRBLUP_CV_means)
+
+# Save results
+write.table(RRBLUP_CV_results, "2021-2022_RRBLUP_Genomic_Updated_Metrics.csv", sep = ",", row.names = FALSE)
