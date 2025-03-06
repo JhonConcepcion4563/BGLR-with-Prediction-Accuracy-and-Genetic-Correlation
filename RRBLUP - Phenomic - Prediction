@@ -1,0 +1,124 @@
+####################################################################################################
+# RRBLUP for Phenomic Predictions with Additional Metrics
+####################################################################################################
+rm(list = ls(all = TRUE))
+
+library(rrBLUP)
+
+setwd("E:/DON_Pheno_Geno_Prediction")
+
+####################################################################################################
+# Read phenomic data
+data_pheno <- read.table("Savitz_Training_Set_2021-2022_Phenomic_Prediction_Range.csv", sep=",", header = TRUE)
+row.names(data_pheno) <- data_pheno[,1]
+data_pheno <- data_pheno[, -1]
+
+# Ensure first column is explicitly named as 'DON'
+colnames(data_pheno)[1] <- "DON"
+
+# Read genomic data
+data_geno <- read.table("Training_Set_Genomic_Prediction_V3.csv", sep=",", header = TRUE)
+data_geno$DON <- NULL
+data_geno$Color <- NULL
+row.names(data_geno) <- data_geno[,1]
+data_geno <- data_geno[, -1]
+
+# Ensure genotype names match in both datasets
+common_genotypes <- intersect(rownames(data_pheno), rownames(data_geno))
+data_pheno <- data_pheno[common_genotypes, ]
+data_geno <- data_geno[common_genotypes, ]
+data_geno <- data.matrix(data_geno)  # Convert genomic data to numeric matrix
+
+# Remove rows with missing values
+data_pheno <- data_pheno[complete.cases(data_pheno), ]
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Number of cross-validation cycles
+cycles <- 100  
+
+# Initialize results matrix
+results_matrix <- matrix(nrow = cycles, ncol = 6) 
+colnames(results_matrix) <- c("Pearson_Correlation", "Genetic_Correlation", "H2_cv", "H2_actual", "Acc", "Acc_1")
+
+for (i in 1:cycles) {
+  print(paste("Cycle", i))
+  
+  # Shuffle and split dataset into training (80%) and testing (20%)
+  data2 <- data_pheno[sample(nrow(data_pheno)), ]
+  train_size <- round(nrow(data_pheno) * 0.80, digits = 0)
+  
+  X_train <- as.matrix(data2[1:train_size, -1])  # Exclude phenotype column
+  X_test <- as.matrix(data2[(train_size + 1):nrow(data2), -1])  # Exclude phenotype column
+  
+  y_train <- as.matrix(data2[1:train_size, 1])  # Phenotype column
+  y_test <- as.matrix(data2[(train_size + 1):nrow(data2), 1])  # Phenotype column
+  
+  # Ensure that X_train and X_test have the same columns
+  colnames(X_test) <- colnames(X_train)
+  
+  # Train RRBLUP model
+  model <- mixed.solve(y = y_train, Z = X_train)
+  
+  # Ensure model$u is a matrix
+  model$u <- as.matrix(model$u)
+  
+  # Adjust dimensions for compatibility
+  if (ncol(X_test) != nrow(model$u)) {
+    model$u <- t(model$u)  # Transpose if necessary
+  }
+  
+  # Predictions
+  pred_test <- X_test %*% model$u
+  
+  # Ensure compatible dimensions for addition
+  if (length(pred_test) == length(model$beta)) {
+    pred_test <- pred_test + model$beta
+  } else {
+    pred_test <- as.vector(pred_test) + as.vector(model$beta)
+  }
+  
+  # Compute Pearson correlation (Prediction Accuracy)
+  Pearson_Correlation <- cor(pred_test, y_test, use = "complete")
+  
+  # Extract genomic data for test genotypes
+  test_genotypes <- rownames(data2)[(train_size + 1):nrow(data2)]
+  data_geno_filtered <- data_geno[test_genotypes, , drop = FALSE]
+  
+  if (nrow(data_geno_filtered) == length(y_test)) {
+    G_test <- (tcrossprod(data_geno_filtered) / ncol(data_geno_filtered)) + diag(1e-6, nrow(data_geno_filtered))
+    model_cv <- mixed.solve(y = y_test, K = G_test)
+    Genetic_Correlation <- cor(pred_test, model_cv$u)
+    
+    genetic_variance_cv <- model_cv$Vu
+    residual_variance_cv <- max(1e-6, var(y_test) - genetic_variance_cv)
+    H2_cv <- genetic_variance_cv / (genetic_variance_cv + residual_variance_cv)
+    
+    genetic_variance_actual <- var(model_cv$u)
+    residual_variance_actual <- max(1e-6, var(y_test) - genetic_variance_actual)
+    H2_actual <- genetic_variance_actual / (genetic_variance_actual + residual_variance_actual)
+    
+    Acc <- sqrt(H2_cv) * Genetic_Correlation
+    Acc_1 <- sqrt(H2_actual) * Genetic_Correlation
+  } else {
+    Genetic_Correlation <- NA
+    H2_cv <- NA
+    H2_actual <- NA
+    Acc <- NA
+    Acc_1 <- NA
+  }
+  
+  # Store results in the matrix
+  results_matrix[i, ] <- c(Pearson_Correlation, Genetic_Correlation, H2_cv, H2_actual, Acc, Acc_1)
+}
+
+# Convert results matrix to a dataframe
+RRBLUP_CV_results <- as.data.frame(results_matrix)
+
+# Compute means across cycles for final summary
+RRBLUP_CV_means <- colMeans(RRBLUP_CV_results, na.rm = TRUE)
+print(RRBLUP_CV_means)
+
+# Save results
+write.table(RRBLUP_CV_results, "2021-2022_RRBLUP_Phenomic_All_Updated_Metrics.csv", sep = ",", row.names = FALSE)
