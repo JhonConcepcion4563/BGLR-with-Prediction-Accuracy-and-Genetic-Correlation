@@ -1,0 +1,110 @@
+# Random Forest Cross Validation with Additional Metrics
+rm(list = ls(all = TRUE))
+
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(randomForest)  # Explicitly load randomForest
+library(rrBLUP)  # For mixed.solve
+
+setwd("E:/DON_Pheno_Geno_Prediction")
+
+####################################################################################################
+# Read data
+data <- read.table("Training_Set_2021_Genomic_Prediction.csv", sep=",", header = TRUE)
+data$Color <- NULL
+row.names(data) <- data[,1]
+data <- data[, -1]
+
+# Remove rows with missing values
+data <- data[complete.cases(data), ]
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Number of cross-validation cycles
+cycles <- 100  
+
+# Initialize results matrix
+results_matrix <- matrix(nrow = cycles, ncol = 6) 
+colnames(results_matrix) <- c("Pearson_Correlation", "Genetic_Correlation", "H2_cv", "H2_actual", "Acc", "Acc_1")
+
+for (i in 1:cycles) {
+  print(paste("Cycle", i))
+  
+  # Split dataset into training (80%) and testing (20%)
+  train_index <- createDataPartition(y = data$DON, p = 0.8, list = FALSE)
+  training_set <- data[train_index, ]
+  testing_set <- data[-train_index, ]
+  
+  # Define tuning grid
+  mtry <- sqrt(ncol(training_set) - 1)  # -1 to exclude the response variable
+  tunegrid <- expand.grid(.mtry = mtry)
+  
+  # Train Random Forest model
+  repeat_cv <- trainControl(method = 'repeatedcv', number = 5, repeats = 3)
+  
+  set.seed(123)
+  forest <- train(DON ~ ., 
+                  data = training_set, 
+                  method = 'rf', 
+                  tuneGrid = tunegrid, 
+                  trControl = repeat_cv)
+  
+  # Predictions on test set
+  y_hats <- predict(object = forest, newdata = testing_set[, -1])
+  
+  # Ensure numeric format
+  y_hats <- as.numeric(y_hats)
+  y_test <- as.numeric(testing_set$DON)
+  
+  # 1. Compute Pearson correlation (Prediction Accuracy)
+  Pearson_Correlation <- cor(y_hats, y_test)
+  
+  # 2. Compute Genomic Relationship Matrix (GRM) for the testing set
+  X_test <- as.matrix(testing_set[, -1])
+  G_test <- tcrossprod(X_test) / ncol(X_test)
+  
+  # 3. Run rrBLUP's mixed.solve to estimate breeding values
+  model_cv <- mixed.solve(y = y_test, K = G_test)
+  
+  # 4. Compute H2_cv (heritability in cross-validation)
+  genetic_variance_cv <- model_cv$Vu
+  residual_variance_cv <- var(y_test) - genetic_variance_cv
+  
+  if (residual_variance_cv < 0) {
+    residual_variance_cv <- 0  # Avoid negative residual variance
+  }
+  
+  H2_cv <- genetic_variance_cv / (genetic_variance_cv + residual_variance_cv)  # Ensure within [0,1]
+  
+  # 5. Compute genetic correlation between RF predictions and rrBLUP breeding values
+  Genetic_Correlation <- cor(y_hats, model_cv$u)
+  
+  # 6. Compute H2_actual (actual heritability from rrBLUP)
+  genetic_variance_actual <- var(model_cv$u)
+  residual_variance_actual <- var(y_test) - genetic_variance_actual
+  
+  if (residual_variance_actual < 0) {
+    residual_variance_actual <- 0  # Avoid negative residual variance
+  }
+  
+  H2_actual <- genetic_variance_actual / (genetic_variance_actual + residual_variance_actual)  # Ensure within [0,1]
+  
+  # 7. Compute accuracy metrics
+  Acc <- sqrt(H2_cv) * Genetic_Correlation
+  Acc_1 <- sqrt(H2_actual) * Genetic_Correlation
+  
+  # Store results in the matrix
+  results_matrix[i, ] <- c(Pearson_Correlation, Genetic_Correlation, H2_cv, H2_actual, Acc, Acc_1)
+}
+
+# Convert results matrix to a dataframe
+RF_CV_results <- as.data.frame(results_matrix)
+
+# Compute means across cycles for final summary
+RF_CV_means <- colMeans(RF_CV_results)
+print(RF_CV_means)
+
+# Save results
+write.table(RF_CV_results, "2021_RandomForest_Genomic_Updated_Metrics.csv", sep = ",", row.names = FALSE)
