@@ -1,0 +1,100 @@
+# Load Data
+data <- read.table("2021-2022-Predict-2022-Phenomic-VIS.csv", sep=",", header=T)
+row.names(data) = data[,1] 
+data = data[,-1]  # Remove first column (genotype names)
+
+# Extract Genotype Names and Trait Names
+lines <- rownames(data)
+traits <- "DON"  # The phenotype column
+
+# Extract Phenotypic Data (DON)
+dataY = as.matrix(data[,"DON"])  # Phenotypic values (with NAs)
+Y <- dataY  
+
+# 🔹 Step 1: Properly Handle Missing Values 🔹
+# If Y has missing values, replace with mean
+if (any(is.na(Y))) {
+  print("Missing values detected in Y. Imputing missing values with the mean.")
+  Y[is.na(Y)] <- mean(Y, na.rm=TRUE)
+}
+
+# 🔹 Step 2: Properly Transform Y (Centering ONLY) 🔹
+Y_mean <- mean(Y, na.rm=TRUE)  
+Y_centered <- Y - Y_mean  # Only centering, NO SCALING
+
+# 🔹 Step 3: Scale and Center the Genotypic Data 🔹
+dataX = data[, -1]  # Remove the phenotype column
+for (x in 1:ncol(dataX)) {dataX[,x] = as.numeric(dataX[,x])}  # Convert to numeric
+dataX = as.matrix(dataX)
+dataX = scale(dataX, scale=T, center=T)  # Standardize
+
+# 🔹 Step 4: Handle Missing Data in X 🔹
+dataX <- t(na.omit(t(dataX)))  # Remove missing markers
+
+# 🔹 Step 5: Create G-Matrix 🔹
+G <- tcrossprod(dataX) / ncol(dataX)  
+if (any(is.na(G) | is.infinite(G))) {
+  print("Warning: Singular G-matrix detected! Try setting use_G = FALSE.")
+}
+
+# 🔹 Step 6: Prepare Output Container 🔹
+Yhats <- matrix(nrow=nrow(dataX), ncol=1)
+rownames(Yhats) <- lines
+colnames(Yhats) <- traits
+
+###############################################################################################
+# 🔥 Bayesian Model (BGLR) - Choose from 'BRR', 'BayesA', 'BayesB', 'BayesC', 'BL'
+###############################################################################################
+model_choice <- "BayesA"  # Change to 'BRR', 'BayesA', 'BayesB', 'BayesC', 'BL'
+use_G <- FALSE  # Change to TRUE to use G-matrix, FALSE for Identity
+
+for (i in 1:ncol(Y)){
+  Yin <- Y_centered[,i]  # Use centered Y
+  Xin <- dataX  # Use standardized X
+  
+  # 🔹 Set Model Parameters 🔹
+  nIter = 50000  # Increased iterations for better convergence
+  burnIn = 10000  # Higher burn-in to discard unstable estimates
+  
+  # 🔹 Model Setup - Use G or Identity Matrix 🔹
+  if (use_G) {
+    ETA = list(list(X = Xin, K = G, model = model_choice, saveEffects=T))  
+  } else {
+    ETA = list(list(X = Xin, model = model_choice))  # Identity matrix
+  }
+  
+  # 🔹 Debugging Info 🔹
+  print(paste("Running BGLR with", model_choice, "and use_G =", use_G))
+  print(paste("Mean Y:", mean(Yin, na.rm=TRUE)))
+  print(paste("SD Y:", sd(Yin, na.rm=TRUE)))
+  
+  # 🔹 Run BGLR 🔹
+  fm <- BGLR(y=Yin, ETA=ETA, nIter=nIter, burnIn=burnIn, verbose=T)
+  
+  # 🔹 Get Predictions 🔹
+  yHat <- fm$yHat  
+  
+  # 🔹 Print Debugging Info 🔹
+  print(paste("Prediction Range Before Transformation:", min(yHat), "to", max(yHat)))
+  
+  # 🔹 Store Predictions 🔹
+  Yhats[,i] <- yHat
+}
+
+# 🔹 Step 7: Convert Predictions Back to Original Scale 🔹
+Yhats_original <- Yhats + Y_mean  # Reverse centering (ONLY ADD MEAN)
+
+# 🔹 Step 8: Print Final Prediction Range 🔹
+print(paste("Final Prediction Range:", min(Yhats_original), "to", max(Yhats_original)))
+
+# 🔹 Step 9: Clip Predictions to Training Range 🔹
+Yhats_original[Yhats_original > max(Y, na.rm=TRUE)] <- max(Y, na.rm=TRUE)
+Yhats_original[Yhats_original < min(Y, na.rm=TRUE)] <- min(Y, na.rm=TRUE)
+
+# 🔹 Step 10: Output Predictions 🔹
+write.table(Yhats_original, paste0("Phenomic_VIS_2021-2022-Predict-2022-", model_choice, ".csv"), sep=",", row.names=TRUE)
+
+# 🔹 Step 11: Play Sound Notification When Done 🔹
+beep(sound = 4, expr = NULL)
+
+print("Prediction Completed Successfully!")
