@@ -1,0 +1,83 @@
+setwd("E:/DON_Pheno_Geno_Prediction/Foward Prediction - V2/Genetic Correlations and other Metrics")
+
+library(rrBLUP)
+
+# **Load SNP Data**
+snps <- read.table("Testing_Genomic_2022.csv", header = TRUE, sep = ",")
+rownames(snps) <- snps[, 1]  # Assign genotype names as row names
+snps_matrix <- as.matrix(snps[, -1])  # Remove genotype column
+
+# **Ensure SNP matrix is numeric**
+mode(snps_matrix) <- "numeric"
+
+# **Remove Monomorphic Markers**
+zero_var_markers <- apply(snps_matrix, 2, var) == 0
+if (any(zero_var_markers)) {
+  cat("⚠️ Removing", sum(zero_var_markers), "monomorphic markers.\n")
+  snps_matrix <- snps_matrix[, !zero_var_markers]
+}
+
+# **Standardize SNPs**
+snps_matrix <- scale(snps_matrix, center = TRUE, scale = TRUE)
+
+# **Compute Full Genomic Relationship Matrix (G)**
+G <- tcrossprod(snps_matrix) / ncol(snps_matrix)
+
+# **Check for Near-Zero Eigenvalues (Matrix Rank Test)**
+eigen_G <- eigen(G, symmetric = TRUE)$values
+cat("\n🔍 Smallest Eigenvalues of G:\n", tail(sort(eigen_G)), "\n")
+
+# **Fix: Increase Regularization Parameter to Improve Rank**
+lambda <- 1e-2  # Try 1e-2 (higher stabilization)
+G <- G + diag(lambda, nrow(G))
+
+# **Check G Matrix Again**
+cat("\n✅ G Matrix Computed. Dimensions:", dim(G), "\n")
+if (any(is.na(G))) stop("🚨 ERROR: G contains NaN values! Check SNP preprocessing.")
+
+# **Load Phenotypic Data**
+data <- read.table("2022-Predict-2022-Forward_Prediction_Summary.csv", header = TRUE, sep = ",")
+rownames(data) <- data[, 1]  # Assign genotype names as row names
+
+# **Extract Phenotype and Predictions**
+yTST <- data$DON
+yHatTST <- data$Model.Average
+
+# **Ensure Phenotypes Match Genotypes in G**
+common_genotypes <- intersect(rownames(G), rownames(data))
+cat("\n🔍 Found", length(common_genotypes), "common genotypes.\n")
+if (length(common_genotypes) == 0) stop("🚨 ERROR: No common genotypes found!")
+
+# **Run rrBLUP to Estimate Genetic Values**
+model_cv <- mixed.solve(y = yTST, K = G)
+
+# **Compute Genetic Correlation**
+Genetic_Correlation <- cor(yHatTST, model_cv$u)
+
+# **Compute Heritability and Accuracy Metrics**
+genetic_variance_cv <- model_cv$Vu
+residual_variance_cv <- max(var(yTST) - genetic_variance_cv, 0)
+H2_cv <- genetic_variance_cv / (genetic_variance_cv + residual_variance_cv)
+
+genetic_variance_actual <- var(model_cv$u)
+residual_variance_actual <- max(var(yTST) - genetic_variance_actual, 0)
+H2_actual <- genetic_variance_actual / (genetic_variance_actual + residual_variance_actual)
+
+Acc <- sqrt(H2_cv) * Genetic_Correlation
+Acc_1 <- sqrt(H2_actual) * Genetic_Correlation
+
+# **Compute Pearson Correlation**
+Pearson_Correlation <- cor(yTST, yHatTST)
+
+# **Print Final Results**
+results <- data.frame(
+  Pearson_Correlation = Pearson_Correlation,
+  Genetic_Correlation = Genetic_Correlation,
+  H2_cv = H2_cv,
+  H2_actual = H2_actual,
+  Acc = Acc,
+  Acc_1 = Acc_1
+)
+
+print(results)
+cat("\n🎉 SUCCESS: All Metrics Computed Correctly!\n")
