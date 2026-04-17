@@ -7,7 +7,7 @@ setwd("C:/Users/Jhon Concepcion/OneDrive - Michigan State University/Switchgrass
 
 ####################################################################################################
 # Read data
-data <- read.table("Final_Hap_Matrix_0.3_KBSM_2024.csv", sep=",", header = TRUE)
+data <- read.table("Final_Hap_Matrix_0.3_KBSM_2024.csv", sep="," , header = TRUE)
 data <- data[!duplicated(data[, 1]), ]
 row.names(data) <- data[, 1]
 data <- data[, -1]
@@ -27,15 +27,27 @@ data <- data[!is.infinite(data[, pheno_col]) & !is.nan(data[, pheno_col]), ]
 cat("Rows after phenotype NA removal:", nrow(data), "\n")
 
 # Mean imputation for missing values in each marker/predictor column
+geno_cols <- setdiff(1:ncol(data), pheno_col)  # Recalculate after row removal
 for (col in geno_cols) {
-  missing_idx <- is.na(data[, col])
+  col_vals <- data[, col]
+  col_mean <- mean(col_vals, na.rm = TRUE)
+  if (is.nan(col_mean) || is.infinite(col_mean)) next  # Skip all-NA columns
+  missing_idx <- is.na(col_vals)
   if (any(missing_idx)) {
-    data[missing_idx, col] <- mean(data[, col], na.rm = TRUE)
+    data[missing_idx, col] <- col_mean
   }
 }
 cat("Mean imputation complete\n")
 
+# Remove any genotype columns still containing NA, NaN, or Inf (e.g. all-NA columns)
+bad_col_names <- colnames(data[, -pheno_col])[apply(data[, -pheno_col], 2, function(x) any(is.na(x) | is.nan(x) | is.infinite(x)))]
+if (length(bad_col_names) > 0) {
+  cat("Removing", length(bad_col_names), "columns with remaining NA/NaN/Inf after imputation\n")
+  data <- data[, !colnames(data) %in% bad_col_names]
+}
+
 # Remove zero-variance genotype columns
+pheno_col <- which(colnames(data) == "BIOMASS")
 geno_all <- as.matrix(data[, -pheno_col])
 zero_var_cols <- which(apply(geno_all, 2, var) == 0)
 
@@ -44,10 +56,15 @@ if (length(zero_var_cols) > 0) {
   data <- data[, -which(colnames(data) %in% names(zero_var_cols))]
 }
 
-# Re-identify phenotype column after column removal
+# Re-identify phenotype column after all column removals
 pheno_col <- which(colnames(data) == "BIOMASS")
 cat("Updated dimensions:", nrow(data), "x", ncol(data), "\n")
 cat("Phenotype still at column:", pheno_col, "\n")
+
+# Final check
+cat("Any NA in genotype columns:", any(is.na(data[, -pheno_col])), "\n")
+cat("Any NaN in genotype columns:", any(sapply(data[, -pheno_col], is.nan)), "\n")
+cat("Any Inf in genotype columns:", any(sapply(data[, -pheno_col], is.infinite)), "\n")
 
 # Set seed for reproducibility
 set.seed(123)
