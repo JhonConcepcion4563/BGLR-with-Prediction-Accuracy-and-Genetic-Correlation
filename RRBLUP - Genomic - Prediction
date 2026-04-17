@@ -3,23 +3,44 @@ rm(list = ls(all = TRUE))
 
 library(rrBLUP)
 
-setwd("E:/DON_Pheno_Geno_Prediction")
+setwd("C:/Users/Jhon Concepcion/OneDrive - Michigan State University/Switchgrass/Genomic_Data/haplotype_output")
 
 ####################################################################################################
 # Read data
-data <- read.table("Training_Set_Genomic_Prediction_V3.csv", sep=",", header = TRUE)
-data$Color <- NULL
-row.names(data) <- data[,1]
+data <- read.table("Final_Hap_Matrix_0.3_KBSM_2024.csv", sep=",", header = TRUE)
+data <- data[!duplicated(data[, 1]), ]
+row.names(data) <- data[, 1]
 data <- data[, -1]
+
+# Dynamically identify phenotype column
+pheno_col <- which(colnames(data) == "BIOMASS")
+cat("Phenotype is column:", pheno_col, "\n")
 
 # Remove rows with missing values
 data <- data[complete.cases(data), ]
+
+# Remove rows with Inf or NaN values
+data <- data[apply(data, 1, function(x) !any(is.infinite(x) | is.nan(x))), ]
+
+# Remove zero-variance genotype columns
+geno_all <- as.matrix(data[, -pheno_col])
+zero_var_cols <- which(apply(geno_all, 2, var) == 0)
+
+if (length(zero_var_cols) > 0) {
+  cat("Removing", length(zero_var_cols), "zero-variance columns\n")
+  data <- data[, -which(colnames(data) %in% names(zero_var_cols))]
+}
+
+# Re-identify phenotype column after column removal
+pheno_col <- which(colnames(data) == "BIOMASS")
+cat("Updated dimensions:", nrow(data), "x", ncol(data), "\n")
+cat("Phenotype still at column:", pheno_col, "\n")
 
 # Set seed for reproducibility
 set.seed(123)
 
 # Number of cross-validation cycles
-cycles <- 100 
+cycles <- 10 
 
 # Initialize results matrix
 results_matrix <- matrix(nrow = cycles, ncol = 6) 
@@ -32,11 +53,11 @@ for (i in 1:cycles) {
   data2 <- data[sample(nrow(data)), ]
   
   train_size <- round(nrow(data) * 0.80, digits = 0)
-  geno_train <- as.matrix(data2[1:train_size, -10])  # Exclude phenotype column
-  geno_valid <- as.matrix(data2[(train_size + 1):nrow(data2), -10])  # Exclude phenotype column
+  geno_train <- as.matrix(data2[1:train_size, -pheno_col])
+  geno_valid <- as.matrix(data2[(train_size + 1):nrow(data2), -pheno_col])
   
-  yld_train <- as.matrix(data2[1:train_size, 10])  # Phenotype column
-  yld_valid <- as.matrix(data2[(train_size + 1):nrow(data2), 10])  # Phenotype column
+  yld_train <- as.matrix(data2[1:train_size, pheno_col])
+  yld_valid <- as.matrix(data2[(train_size + 1):nrow(data2), pheno_col])
   
   yld <- yld_train[,1]
   yld_answer <- mixed.solve(yld, Z = geno_train, K = NULL, SE = FALSE, return.Hinv = FALSE)
@@ -96,4 +117,4 @@ RRBLUP_CV_means <- colMeans(RRBLUP_CV_results)
 print(RRBLUP_CV_means)
 
 # Save results
-write.table(RRBLUP_CV_results, "2021-2022_RRBLUP_Genomic_Updated_Metrics.csv", sep = ",", row.names = FALSE)
+write.table(RRBLUP_CV_results, "RRBLUP_Hap_0.3_KBSM_2024.csv", sep = ",", row.names = FALSE)
