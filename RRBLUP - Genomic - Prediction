@@ -16,13 +16,17 @@ data <- data[, -1]
 pheno_col <- which(colnames(data) == "BIOMASS")
 cat("Phenotype is column:", pheno_col, "\n")
 
+# Force all genotype columns to numeric
+geno_cols <- setdiff(1:ncol(data), pheno_col)
+data[, geno_cols] <- lapply(data[, geno_cols], function(x) as.numeric(as.character(x)))
+cat("Any non-numeric genotype columns remaining:", any(sapply(data[, geno_cols], class) != "numeric"), "\n")
+
 # Remove rows where BIOMASS phenotype is missing, Inf, or NaN only
 data <- data[!is.na(data[, pheno_col]), ]
 data <- data[!is.infinite(data[, pheno_col]) & !is.nan(data[, pheno_col]), ]
 cat("Rows after phenotype NA removal:", nrow(data), "\n")
 
 # Mean imputation for missing values in each marker/predictor column
-geno_cols <- setdiff(1:ncol(data), pheno_col)
 for (col in geno_cols) {
   missing_idx <- is.na(data[, col])
   if (any(missing_idx)) {
